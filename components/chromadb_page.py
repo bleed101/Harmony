@@ -4,7 +4,7 @@ import chromadb
 class ChromaDBPage:
     def __init__(self):
         self.chroma_client = chromadb.HttpClient(host='localhost', port=8000)
-        self.collection = self.chroma_client.get_collection(name="my_collection")
+        self.collection = self.chroma_client.get_or_create_collection(name="my_collection")
 
     def display(self):
         st.title("ChromaDB Interaction App")
