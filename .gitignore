@@ -1,2 +1,4 @@
 **/__pycache__/
 .env
+my_chroma_data
+chroma.log
