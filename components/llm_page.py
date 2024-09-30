@@ -118,19 +118,24 @@
 
 import streamlit as st
 import os
+import uuid
+
 from dotenv import load_dotenv, find_dotenv
 from llama_index.llms.gemini import Gemini
 from chromadb import HttpClient
 from llama_index.core.llms import ChatMessage
+from collections import Counter
+from sentence_transformers import SentenceTransformer
 
 class LlmPage:
     def __init__(self):
         load_dotenv(find_dotenv(), override=True)
         self.chroma_client = HttpClient(host='localhost', port=8000)
-        self.collection = self.chroma_client.get_or_create_collection(name="my_collection")
+        self.collection = self.chroma_client.get_or_create_collection(name="my_collection",metadata={"hnsw:space": "cosine"})
         self.index = self.load_data()
         self.initialize_session_state()
         self.chat_engine = self.create_chat_engine()
+        self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')  # Pre-trained model for sentence embeddings
 
     def initialize_session_state(self):
         if "messages" not in st.session_state:
@@ -141,6 +146,8 @@ class LlmPage:
             st.session_state.top_p = 0.9
         if "top_k" not in st.session_state:
             st.session_state.top_k = 50
+        if "faq_counter" not in st.session_state:
+            st.session_state.faq_counter = Counter()
 
     @st.cache_data(show_spinner=False)
     def load_data(_self):
@@ -156,23 +163,30 @@ class LlmPage:
         return [{"id": "doc1", "text": "Document content here"}]
     
     def frequently_asked_questions(self):
+        # Query all documents with a count value (retrieve all entries first)
+        all_prompts = self.collection.get(include=['documents', 'metadatas'])
+        # Filter results to ensure the 'count' field exists and then sort them by count in descending order
+        sorted_prompts = sorted(
+            [doc for doc in all_prompts['metadatas'] if doc is not None and 'count' in doc],
+            key=lambda x: x['count'],
+            reverse=True
+        )
         # Example prompts
-        example_prompts = [
-            "How create custom server in NodeJs?",
-            "How can I Implement React with Nodejs?",
-            "How can I implement LLMs in Nodejs?",
+        faq_prompts = [
+            # "How create custom server in NodeJs?",
+            # "How can I Implement React with Nodejs?",
+            # "How can I implement LLMs in Nodejs?",
         ]
+        dynamic_range= min(3,len(sorted_prompts))
+        for i in range(dynamic_range):
+            faq_prompts.append(sorted_prompts[i]['prompt'])
 
         button_cols = st.columns(3)
 
         button_pressed = ""
-
-        if button_cols[0].button(example_prompts[0]):
-            button_pressed = example_prompts[0]
-        elif button_cols[1].button(example_prompts[1]):
-            button_pressed = example_prompts[1]
-        elif button_cols[2].button(example_prompts[2]):
-            button_pressed = example_prompts[2]
+        for i in range(dynamic_range):
+            if button_cols[i].button(faq_prompts[i]):
+                button_pressed = faq_prompts[i]
         
         if button_pressed:
             st.session_state.messages.append({"role": "user", "content":button_pressed})
@@ -192,8 +206,8 @@ class LlmPage:
         st.header("Talk to your Self-esteem 💬 📚")
         self.handle_user_input()
         self.reset_chat()
-        self.frequently_asked_questions()
         self.display_messages()
+        self.frequently_asked_questions()
 
     def handle_user_input(self):
         st.divider()
@@ -219,6 +233,27 @@ class LlmPage:
                 for r in response:
                     response_content += r.delta
                 st.session_state.messages.append({"role": "assistant", "content": response_content})
+                self.update_faq_counter(prompt)
+                
+    def update_faq_counter(self, prompt):
+        prompt_embedding = self.embedding_model.encode(prompt).tolist()
+        results = self.collection.query(query_embeddings=[prompt_embedding], n_results=1, include=['documents', 'distances','metadatas'])
+        
+        if results['documents'][0] and results['distances'][0][0] < 0.45:  # Threshold for cosine similarity
+            matched_question = results['documents'][0][0]
+            st.session_state.faq_counter[matched_question] += 1
+            current_count = results['metadatas'][0][0]['count']
+            self.collection.update(results['ids'][0][0], metadatas=[{"count": current_count + 1}])
+        else:
+            new_id = str(uuid.uuid4())  # Generate a new UUID
+            st.session_state.faq_counter[prompt] += 1
+            self.collection.add(
+                ids=[new_id],
+                documents=[prompt],
+                embeddings=[prompt_embedding],
+                metadatas=[{'prompt':prompt,"count": 1}]
+            )
+
     
     def reset_chat(self):
         if st.sidebar.button("Clear Chat",type="primary"):
